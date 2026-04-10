@@ -155,11 +155,27 @@ async function parseExport(files, prebuiltMap = null) {
     data.inventions.push(inv);
   }
 
+  // Fallback: if no images found via subroom/invention structure,
+  // collect every image file from anywhere in the uploaded folder
+  if (data.allImages.length === 0) {
+    for (const p of paths) {
+      const name = p.split("/").pop();
+      if (/\.(jpg|png|jpeg)$/i.test(name)) {
+        const file = byPath[p];
+        const url = URL.createObjectURL(file);
+        const parts = p.split("/");
+        const folder = parts.length > 2 ? parts[parts.length - 2] : (parts[0] || "root");
+        data.allImages.push({
+          id: name, name, url, path: p,
+          subroom: folder, subroomId: folder,
+          type: "subroom-image"
+        });
+      }
+    }
+  }
+
   return data;
 }
-
-// ─────────────────────────────────────────────────────────────
-// SHARED COMPONENTS
 // ─────────────────────────────────────────────────────────────
 
 const S = {
