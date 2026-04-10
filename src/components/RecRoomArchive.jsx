@@ -32,18 +32,48 @@ function parseCSV(text) {
   });
 }
 
-async function parseExport(files) {
+// Walk a dropped directory entry recursively, returning {path: File} map
+async function walkEntry(entry, pathSoFar = "") {
+  const result = {};
+  if (entry.isFile) {
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    result[pathSoFar + entry.name] = file;
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    // readEntries returns max 100 at a time — must loop until empty
+    let batch;
+    do {
+      batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      for (const child of batch) {
+        const sub = await walkEntry(child, pathSoFar + entry.name + "/");
+        Object.assign(result, sub);
+      }
+    } while (batch.length > 0);
+  }
+  return result;
+}
+
+async function parseExport(files, prebuiltMap = null) {
   const data = {
     roomName: "", roomDetails: null, roomImageUrl: null,
     subrooms: [], inventions: [],
     allImages: [], allAudio: [], allGlb: [],
     errors: [],
   };
-  if (!files.length) return data;
 
-  const byPath = {};
-  for (const f of files) byPath[f.webkitRelativePath] = f;
-  const paths = Object.keys(byPath);
+  let byPath = {};
+  if (prebuiltMap) {
+    byPath = prebuiltMap;
+  } else {
+    if (!files.length) return data;
+    for (const f of files) {
+      const p = f.webkitRelativePath || f.name;
+      byPath[p] = f;
+    }
+  }
+
+  const paths = Object.keys(byPath).filter(Boolean);
+  if (!paths.length) return data;
   data.roomName = paths[0].split("/")[0];
 
   // Root files
@@ -77,7 +107,7 @@ async function parseExport(files) {
       const rel = p.slice(prefix.length);
       if (name === "Subroom.json") {
         try { sr.metadata = JSON.parse(await readText(file)); } catch {}
-      } else if (rel.startsWith("Image/") && /\.(jpg|png|jpeg)$/i.test(name)) {
+      } else if (/\.(jpg|png|jpeg)$/i.test(name)) {
         const url = URL.createObjectURL(file);
         const img = { id: name, name, url, path: p, subroom: sr.name, subroomId: sr.id, type: "subroom-image" };
         sr.images.push(img); data.allImages.push(img);
@@ -113,7 +143,7 @@ async function parseExport(files) {
       else if (name === "InventionDetails.json") { try { inv.details = JSON.parse(await readText(file)); } catch {} }
       else if (name === "InventionVersion.json") { try { inv.version = JSON.parse(await readText(file)); } catch {} }
       else if (/^InventionImage\.(jpg|png|jpeg)/i.test(name)) { inv.imageUrl = URL.createObjectURL(file); }
-      else if (rel.startsWith("Image/") && /\.(jpg|png|jpeg)$/i.test(name)) {
+      else if (/\.(jpg|png|jpeg)$/i.test(name)) {
         const url = URL.createObjectURL(file);
         const img = { id: name, name, url, path: p, invention: inv.name, inventionId: inv.id, type: "invention-image" };
         inv.images.push(img); data.allImages.push(img);
@@ -198,7 +228,19 @@ function UploadPage({ onFiles }) {
       </div>
 
       <div
-        onDrop={e => { e.preventDefault(); setDrag(false); onFiles(e.dataTransfer.files); }}
+        onDrop={async e => {
+          e.preventDefault(); setDrag(false);
+          // dataTransfer.files loses webkitRelativePath — use items + webkitGetAsEntry instead
+          const items = [...(e.dataTransfer.items || [])];
+          const entries = items.map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+          if (entries.length) {
+            const maps = await Promise.all(entries.map(en => walkEntry(en, "")));
+            const merged = Object.assign({}, ...maps);
+            if (Object.keys(merged).length) { onFiles(null, merged); return; }
+          }
+          // fallback: plain files (file input path)
+          onFiles(e.dataTransfer.files);
+        }}
         onDragOver={e => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onClick={() => inputRef.current?.click()}
@@ -950,15 +992,15 @@ export default function App() {
   const [progress, setProgress] = useState("");
   const [page, setPage] = useState("gallery");
 
-  const handleFiles = useCallback(async (files) => {
-    if (!files?.length) return;
+  const handleFiles = useCallback(async (files, prebuiltMap = null) => {
+    if (!files?.length && !prebuiltMap) return;
     setLoading(true);
     setProgress("Scanning folder structure…");
     await new Promise(r => setTimeout(r, 30));
     setProgress("Parsing JSON metadata…");
     await new Promise(r => setTimeout(r, 30));
     try {
-      const data = await parseExport(Array.from(files));
+      const data = await parseExport(files ? Array.from(files) : [], prebuiltMap);
       setProgress("Processing media files…");
       await new Promise(r => setTimeout(r, 50));
       setExportData(data);
